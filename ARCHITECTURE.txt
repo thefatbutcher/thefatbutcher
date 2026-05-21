@@ -1,0 +1,245 @@
+═══════════════════════════════════════════════════════════════════════════════
+                        SHOPIFY PROXY API - ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          EXTERNAL CLIENTS                                   │
+│                                                                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   Claude AI  │  │  Make.com    │  │   Postman    │  │   Browser    │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
+│         │                 │                 │                 │            │
+└─────────┼─────────────────┼─────────────────┼─────────────────┼────────────┘
+          │                 │                 │                 │
+          │                 │                 │                 │
+          └─────────────────┴─────────────────┴─────────────────┘
+                                    │
+                                    │ HTTPS
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              NGROK TUNNEL                                   │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  Public URL: https://abc123def456.ngrok-free.app                      │ │
+│  │                                                                        │ │
+│  │  Features:                                                             │ │
+│  │  ✅ HTTPS encryption                                                   │ │
+│  │  ✅ Request inspection (http://127.0.0.1:4040)                        │ │
+│  │  ✅ Automatic request logging                                         │ │
+│  │  ⚠️  URL changes on restart (free plan)                               │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  │ HTTP (localhost)
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         YOUR LOCAL MACHINE                                  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                    EXPRESS SERVER (Port 3001)                         │ │
+│  │                                                                        │ │
+│  │  Endpoints:                                                            │ │
+│  │  • GET /                          (health check)                      │ │
+│  │  • GET /customer-ltv-by-channel   (customer analytics)                │ │
+│  │  • GET /web-to-app-customers      (conversion tracking)               │ │
+│  │  • GET /abandoned-checkouts       (cart recovery)                     │ │
+│  │  • GET /delivery-slots            (delivery management)               │ │
+│  │                                                                        │ │
+│  │  Features:                                                             │ │
+│  │  ✅ CORS enabled                                                       │ │
+│  │  ✅ Request logging                                                    │ │
+│  │  ✅ Error handling                                                     │ │
+│  │  ✅ Rate limit retry logic                                            │ │
+│  │  ✅ Pagination support                                                │ │
+│  └────────────────────────────┬──────────────────────────────────────────┘ │
+│                                │                                            │
+│                                │ HTTPS (Shopify Admin API)                 │
+│                                ▼                                            │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                      ENVIRONMENT VARIABLES                            │ │
+│  │                                                                        │ │
+│  │  SHOPIFY_SHOP=your-store.myshopify.com                               │ │
+│  │  SHOPIFY_TOKEN=YOUR_SHOPIFY_ADMIN_TOKEN                              │ │
+│  │  PORT=3001                                                            │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  │ HTTPS (Shopify Admin API v2024-01)
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            SHOPIFY STORE                                    │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  Store: your-store.myshopify.com                                      │ │
+│  │                                                                        │ │
+│  │  Data Sources:                                                         │ │
+│  │  • Orders (with customer, tags, fulfillment status)                   │ │
+│  │  • Customers (with order history)                                     │ │
+│  │  • Checkouts (abandoned carts)                                        │ │
+│  │                                                                        │ │
+│  │  API Version: 2024-01                                                 │ │
+│  │  Authentication: Admin API Token                                      │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                              DATA FLOW EXAMPLE
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Claude AI makes request:
+   GET https://abc123def456.ngrok-free.app/customer-ltv-by-channel?days=30
+
+2. ngrok receives request:
+   • Logs request in dashboard (http://127.0.0.1:4040)
+   • Forwards to localhost:3001
+
+3. Express server processes request:
+   • Validates parameters (days=30)
+   • Calculates date range (last 30 days)
+   • Makes API call to Shopify
+
+4. Shopify API responds:
+   • Returns order data with customer info
+   • Includes pagination links if needed
+
+5. Express server processes data:
+   • Groups customers by first purchase channel
+   • Calculates LTV, order count, averages
+   • Formats response as JSON
+
+6. Response flows back:
+   Express → ngrok → Claude AI
+
+7. Claude receives JSON:
+   {
+     "period_days": 30,
+     "by_channel": {
+       "app": { "customers": 50, "avg_ltv": 250.00, ... },
+       "web": { "customers": 120, "avg_ltv": 180.00, ... },
+       "other": { "customers": 10, "avg_ltv": 150.00, ... }
+     }
+   }
+
+═══════════════════════════════════════════════════════════════════════════════
+                            REQUEST/RESPONSE FLOW
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────┐                                              ┌─────────────┐
+│   Client    │                                              │   Shopify   │
+│ (Claude AI) │                                              │    Store    │
+└──────┬──────┘                                              └──────▲──────┘
+       │                                                            │
+       │ 1. GET /customer-ltv-by-channel?days=30                   │
+       ├──────────────────────────────────────────┐                │
+       │                                           │                │
+       ▼                                           ▼                │
+┌─────────────┐                            ┌─────────────┐         │
+│    ngrok    │                            │   Express   │         │
+│   Tunnel    │ 2. Forward to localhost    │   Server    │         │
+│             ├───────────────────────────▶│             │         │
+└─────────────┘                            └──────┬──────┘         │
+       ▲                                          │                │
+       │                                          │ 3. Fetch orders│
+       │                                          ├────────────────┘
+       │                                          │
+       │                                          │ 4. Process data
+       │                                          │    (group, calc)
+       │                                          │
+       │                                          ▼
+       │                                   ┌─────────────┐
+       │ 5. Return JSON                    │   Format    │
+       └───────────────────────────────────┤   Response  │
+                                           └─────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                              SECURITY LAYERS
+═══════════════════════════════════════════════════════════════════════════════
+
+Layer 1: ngrok HTTPS
+  ✅ All traffic encrypted in transit
+  ✅ Valid SSL certificate
+  ⚠️ URL is public (anyone with URL can access)
+
+Layer 2: Express Server
+  ✅ CORS enabled (allows cross-origin requests)
+  ✅ Input validation on query parameters
+  ✅ Error handling (doesn't expose sensitive data)
+
+Layer 3: Shopify Authentication
+  ✅ API token stored in .env (not exposed)
+  ✅ Token never sent to client
+  ✅ All Shopify requests authenticated
+
+Layer 4: Shopify API
+  ✅ Rate limiting (429 handling)
+  ✅ Token-based authentication
+  ✅ Scoped permissions (read-only)
+
+═══════════════════════════════════════════════════════════════════════════════
+                            MONITORING & DEBUGGING
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Server Logs (Terminal)
+   • Request timestamps
+   • HTTP method and path
+   • Error messages
+
+2. ngrok Dashboard (http://127.0.0.1:4040)
+   • All requests in real-time
+   • Request/response headers
+   • Request/response bodies
+   • Response times
+   • Status codes
+   • Replay requests
+
+3. Testing Tools
+   • test-endpoints.ps1 (automated testing)
+   • curl (manual testing)
+   • Postman (API testing)
+   • Browser (visual testing)
+
+═══════════════════════════════════════════════════════════════════════════════
+                              SCALABILITY NOTES
+═══════════════════════════════════════════════════════════════════════════════
+
+Current Setup (Development):
+  • Single server instance
+  • No caching
+  • No load balancing
+  • ngrok free plan (2-hour timeout)
+
+For Production Consider:
+  • ngrok paid plan (static domain, no timeout)
+  • Redis caching for frequently accessed data
+  • Rate limiting on API endpoints
+  • Authentication/API keys
+  • Load balancing (multiple instances)
+  • Database for analytics storage
+  • Webhook support for real-time updates
+
+═══════════════════════════════════════════════════════════════════════════════
+                            TECHNOLOGY STACK
+═══════════════════════════════════════════════════════════════════════════════
+
+Runtime:
+  • Node.js (JavaScript runtime)
+
+Framework:
+  • Express.js 5.2.1 (web server)
+
+Dependencies:
+  • cors 2.8.6 (CORS middleware)
+  • dotenv 17.4.2 (environment variables)
+  • node-fetch 3.3.2 (HTTP client)
+
+Tools:
+  • ngrok 3.3.1 (secure tunneling)
+  • PowerShell (automation scripts)
+
+APIs:
+  • Shopify Admin API v2024-01
+
+═══════════════════════════════════════════════════════════════════════════════
