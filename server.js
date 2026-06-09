@@ -156,8 +156,10 @@ async function fetchAllOrders(since) {
   )}&limit=250&fields=id,created_at,total_price,source_name,customer,tags,fulfillment_status`;
 
   const allOrders = [];
+  let pageCount = 0;
 
   while (url) {
+    pageCount++;
     const res = await shopifyRequest(url);
 
     if (!res.ok) {
@@ -173,14 +175,19 @@ async function fetchAllOrders(since) {
     url = nextMatch ? nextMatch[1] : null;
   }
 
+  console.log(`Fetched ${allOrders.length} total orders across ${pageCount} page(s)`);
+  console.log('Pagination completed');
+
   return allOrders;
 }
 
 async function fetchPaginatedResource(resource, query) {
   let url = `${buildShopifyApiUrl(`${resource}.json`)}?${query}`;
   const results = [];
+  let pageCount = 0;
 
   while (url) {
+    pageCount++;
     const res = await shopifyRequest(url);
 
     if (!res.ok) {
@@ -196,6 +203,9 @@ async function fetchPaginatedResource(resource, query) {
     const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
     url = nextMatch ? nextMatch[1] : null;
   }
+
+  console.log(`Fetched ${results.length} total ${resource} across ${pageCount} page(s)`);
+  console.log('Pagination completed');
 
   return results;
 }
@@ -374,13 +384,12 @@ app.get('/abandoned-checkouts', async (req, res) => {
 
 app.get('/delivery-slots', async (req, res) => {
   try {
-    const data = await shopifyFetch(
-      'orders.json?status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags'
-    );
+    const query = 'status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags';
+    const orders = await fetchPaginatedResource('orders', query);
 
     const slotMap = new Map();
 
-    for (const order of data.orders || []) {
+    for (const order of orders) {
       const tags = order.tags || '';
       const match = tags.match(DELIVERY_TAG_REGEX);
 

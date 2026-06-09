@@ -1,0 +1,189 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                   SHOPIFY PAGINATION FLOW DIAGRAM                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CLIENT REQUEST                                                              │
+│ GET /customer-ltv-by-channel?days=365                                       │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ EXPRESS ENDPOINT                                                            │
+│ app.get('/customer-ltv-by-channel')                                         │
+│   const orders = await fetchAllOrders(since);  ◄─── Uses pagination helper │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PAGINATION FUNCTION: fetchAllOrders()                                       │
+│                                                                             │
+│ let allOrders = []                                                          │
+│ let pageCount = 0                                                           │
+│ let url = "orders.json?status=any&created_at_min=...&limit=250"            │
+│                                                                             │
+│ ┌─────────────────────────────────────────────────────────────────────┐   │
+│ │ PAGINATION LOOP                                                     │   │
+│ │                                                                     │   │
+│ │ while (url exists) {                                                │   │
+│ │   pageCount++                                                       │   │
+│ │   ┌───────────────────────────────────────────────────────────┐   │   │
+│ │   │ REQUEST PAGE #1                                           │   │   │
+│ │   │ GET /admin/api/2024-01/orders.json?limit=250              │   │   │
+│ │   │                                                            │   │   │
+│ │   │ Response:                                                  │   │   │
+│ │   │ ✓ 250 orders                                              │   │   │
+│ │   │ ✓ Link: <...?page_info=abc123>; rel="next"               │   │   │
+│ │   │                                                            │   │   │
+│ │   │ allOrders += 250 orders                                   │   │   │
+│ │   │ url = "...?page_info=abc123"                              │   │   │
+│ │   └───────────────────────────────────────────────────────────┘   │   │
+│ │                        ▼                                            │   │
+│ │   ┌───────────────────────────────────────────────────────────┐   │   │
+│ │   │ REQUEST PAGE #2                                           │   │   │
+│ │   │ GET /admin/api/2024-01/orders.json?page_info=abc123       │   │   │
+│ │   │                                                            │   │   │
+│ │   │ Response:                                                  │   │   │
+│ │   │ ✓ 250 orders                                              │   │   │
+│ │   │ ✓ Link: <...?page_info=def456>; rel="next"               │   │   │
+│ │   │                                                            │   │   │
+│ │   │ allOrders += 250 orders (total: 500)                      │   │   │
+│ │   │ url = "...?page_info=def456"                              │   │   │
+│ │   └───────────────────────────────────────────────────────────┘   │   │
+│ │                        ▼                                            │   │
+│ │   ┌───────────────────────────────────────────────────────────┐   │   │
+│ │   │ REQUEST PAGE #3                                           │   │   │
+│ │   │ GET /admin/api/2024-01/orders.json?page_info=def456       │   │   │
+│ │   │                                                            │   │   │
+│ │   │ Response:                                                  │   │   │
+│ │   │ ✓ 180 orders                                              │   │   │
+│ │   │ ✗ NO Link header (last page!)                            │   │   │
+│ │   │                                                            │   │   │
+│ │   │ allOrders += 180 orders (total: 680)                      │   │   │
+│ │   │ url = null ◄── EXIT LOOP                                  │   │   │
+│ │   └───────────────────────────────────────────────────────────┘   │   │
+│ │ }                                                                   │   │
+│ └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│ console.log(`Fetched 680 total orders across 3 page(s)`)                   │
+│ console.log('Pagination completed')                                        │
+│                                                                             │
+│ return allOrders  // Array with 680 orders                                 │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ BUSINESS LOGIC                                                              │
+│ Process ALL 680 orders (not just first 250!)                               │
+│ - Calculate customer LTV                                                    │
+│ - Group by acquisition channel                                             │
+│ - Compute statistics                                                        │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ JSON RESPONSE                                                               │
+│ {                                                                           │
+│   "period_days": 365,                                                       │
+│   "by_channel": {                                                           │
+│     "app": { "customers": 145, "total_revenue": 32450.25, ... },           │
+│     "web": { "customers": 423, "total_revenue": 89234.50, ... },           │
+│     "other": { "customers": 12, "total_revenue": 1234.00, ... }            │
+│   }                                                                         │
+│ }                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         RATE LIMIT HANDLING                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│ SCENARIO: Shopify returns 429 Too Many Requests                          │
+└─────────────────────────────────┬─────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ shopifyRequest() DETECTS 429                                                │
+│                                                                             │
+│ if (response.status === 429) {                                             │
+│   const retryDelayMs = getRetryDelayMs(                                    │
+│     response.headers.get('Retry-After')  // e.g., "2.0" seconds            │
+│   );                                                                        │
+│                                                                             │
+│   await sleep(retryDelayMs);  // Wait 2 seconds                            │
+│   response = await fetchFn(url, { headers });  // Retry request            │
+│ }                                                                           │
+│                                                                             │
+│ ✓ Request succeeds on retry                                                │
+│ ✓ Pagination continues normally                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         ALL ENDPOINTS UPDATED                                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Endpoint                      │ Function Used          │ Max Records      │
+├───────────────────────────────┼────────────────────────┼──────────────────┤
+│ /customer-ltv-by-channel      │ fetchAllOrders()       │ ✅ UNLIMITED    │
+│ /web-to-app-customers         │ fetchAllOrders()       │ ✅ UNLIMITED    │
+│ /abandoned-checkouts          │ fetchPaginatedResource │ ✅ UNLIMITED    │
+│ /delivery-slots               │ fetchPaginatedResource │ ✅ UNLIMITED    │
+└────────────────────────────────────────────────────────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         CONSOLE OUTPUT EXAMPLE                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+[2026-06-09T10:30:15.123Z] GET /customer-ltv-by-channel?days=365
+Fetched 1247 total orders across 5 page(s)
+Pagination completed
+
+[2026-06-09T10:31:42.456Z] GET /web-to-app-customers?days=90
+Fetched 387 total orders across 2 page(s)
+Pagination completed
+
+[2026-06-09T10:32:18.789Z] GET /abandoned-checkouts?days=14
+Fetched 89 total checkouts across 1 page(s)
+Pagination completed
+
+[2026-06-09T10:33:05.321Z] GET /delivery-slots
+Fetched 312 total orders across 2 page(s)
+Pagination completed
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         KEY BENEFITS                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+✅ Complete Data Accuracy
+   Before: Only first 250 records analyzed
+   After:  ALL records analyzed (could be thousands)
+
+✅ Transparent Monitoring
+   Console logs show exactly how much data is being processed
+
+✅ Automatic Rate Limit Handling
+   429 errors are caught and retried automatically
+
+✅ No Breaking Changes
+   All endpoint URLs and response formats remain identical
+
+✅ Production Ready
+   Compatible with existing Railway deployment
+   No new dependencies or configuration required
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         READY TO DEPLOY                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Commands:
+  git add server.js PAGINATION-*.md CODE-CHANGES-SUMMARY.md
+  git commit -m "Implement complete Shopify pagination with logging"
+  git push origin main
+
+Railway will auto-deploy in ~2 minutes. Check logs to see pagination in action!
