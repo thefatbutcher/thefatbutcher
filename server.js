@@ -8,16 +8,31 @@ const PORT = Number(process.env.PORT) || 3001;
 const SHOPIFY_API_VERSION = '2024-01';
 const DELIVERY_TAG_REGEX = /Delivery on (\d+ \w+ \d{4})/;
 
-// In-memory cache for analytics endpoints
-const cache = new Map();
+// Precomputed Analytics Store (Background Worker Architecture)
+const analyticsStore = new Map();
 
-// Cache TTL configuration (in milliseconds)
-const CACHE_TTL = {
-  'customer-ltv-by-channel': 15 * 60 * 1000,  // 15 minutes
-  'web-to-app-customers': 15 * 60 * 1000,      // 15 minutes
-  'abandoned-checkouts': 7 * 60 * 1000,        // 7 minutes
-  'delivery-slots': 15 * 60 * 1000             // 15 minutes
+// Store metadata
+const storeMetadata = {
+  lastUpdated: null,
+  isRefreshing: false,
+  refreshCount: 0,
+  errors: []
 };
+
+// Refresh interval configuration
+const REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
+
+// Precomputed analytics configurations
+const ANALYTICS_CONFIGS = [
+  { type: 'ltv', days: 365 },
+  { type: 'ltv', days: 90 },
+  { type: 'ltv', days: 30 },
+  { type: 'web-to-app', days: 365 },
+  { type: 'web-to-app', days: 90 },
+  { type: 'abandoned', days: 14 },
+  { type: 'abandoned', days: 7 },
+  { type: 'delivery-slots', days: null }
+];
 
 // Node 18+ exposes fetch globally. If it is unavailable, fall back to node-fetch.
 const fetchFn = (...args) => {
@@ -115,41 +130,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Cache helper functions
-function getCacheKey(endpoint, queryParams) {
-  const params = new URLSearchParams(queryParams).toString();
-  return params ? `${endpoint}?${params}` : endpoint;
+// Analytics Store helper functions
+function getStoreKey(type, days) {
+  return days !== null ? `${type}:${days}` : type;
 }
 
-function getCachedData(cacheKey, endpointName) {
-  const cached = cache.get(cacheKey);
-  
-  if (!cached) {
-    console.log(`Cache MISS: ${cacheKey}`);
-    return null;
+function getFromStore(key) {
+  const data = analyticsStore.get(key);
+  if (data) {
+    console.log(`⚡ Served from precomputed store: ${key}`);
+    return data;
   }
-  
-  const now = Date.now();
-  const age = now - cached.timestamp;
-  const ttl = CACHE_TTL[endpointName] || 10 * 60 * 1000;
-  
-  if (age > ttl) {
-    console.log(`Cache EXPIRED: ${cacheKey} (age: ${Math.round(age / 1000)}s, TTL: ${Math.round(ttl / 1000)}s)`);
-    cache.delete(cacheKey);
-    return null;
-  }
-  
-  console.log(`Cache HIT: ${cacheKey} (age: ${Math.round(age / 1000)}s)`);
-  return cached.data;
+  console.log(`⚠️  Store MISS: ${key} (data not yet computed)`);
+  return null;
 }
 
-function setCachedData(cacheKey, data, endpointName) {
-  cache.set(cacheKey, {
-    data: data,
-    timestamp: Date.now(),
-    ttl: CACHE_TTL[endpointName] || 10 * 60 * 1000
-  });
-  console.log(`Cache STORED: ${cacheKey}`);
+function setInStore(key, data) {
+  analyticsStore.set(key, data);
+  console.log(`💾 Stored precomputed analytics: ${key}`);
 }
 
 function getRetryDelayMs(retryAfterHeader) {
@@ -258,80 +256,293 @@ async function fetchPaginatedResource(resource, query) {
   return results;
 }
 
+// Background Analytics Computation Functions
+async function computeCustomerLtvByChannel(orders, days) {
+  const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const customers = new Map();
+
+  for (const order of sortedOrders) {
+    const customerKey = getCustomerKey(order.customer);
+    if (!customerKey) {
+      continue;
+    }
+
+    const revenue = Number.parseFloat(order.total_price || 0);
+    const channel = normalizeChannel(order.source_name);
+
+    if (!customers.has(customerKey)) {
+      customers.set(customerKey, {
+        firstChannel: channel,
+        totalOrders: 0,
+        totalRevenue: 0
+      });
+    }
+
+    const customerStats = customers.get(customerKey);
+    customerStats.totalOrders += 1;
+    customerStats.totalRevenue += revenue;
+  }
+
+  const byChannel = {
+    app: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 },
+    web: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 },
+    other: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 }
+  };
+
+  for (const stats of customers.values()) {
+    const channelStats = byChannel[stats.firstChannel];
+    channelStats.customers += 1;
+    channelStats.total_revenue += stats.totalRevenue;
+    channelStats.total_orders += stats.totalOrders;
+  }
+
+  for (const channel of Object.keys(byChannel)) {
+    const stats = byChannel[channel];
+    stats.total_revenue = roundCurrency(stats.total_revenue);
+    stats.avg_ltv = stats.customers ? roundCurrency(stats.total_revenue / stats.customers) : 0;
+    stats.avg_orders = stats.customers ? roundCurrency(stats.total_orders / stats.customers) : 0;
+  }
+
+  return {
+    period_days: days,
+    by_channel: byChannel
+  };
+}
+
+async function computeWebToAppCustomers(orders, days) {
+  const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const customers = new Map();
+
+  for (const order of sortedOrders) {
+    const customerKey = getCustomerKey(order.customer);
+    if (!customerKey) {
+      continue;
+    }
+
+    const channel = normalizeChannel(order.source_name);
+
+    if (!customers.has(customerKey)) {
+      customers.set(customerKey, {
+        firstChannel: channel,
+        channels: new Set([channel])
+      });
+      continue;
+    }
+
+    customers.get(customerKey).channels.add(channel);
+  }
+
+  let webFirstCustomers = 0;
+  let webThenApp = 0;
+
+  for (const customer of customers.values()) {
+    if (customer.firstChannel !== 'web') {
+      continue;
+    }
+
+    webFirstCustomers += 1;
+
+    if (customer.channels.has('app')) {
+      webThenApp += 1;
+    }
+  }
+
+  const rate = webFirstCustomers ? roundCurrency((webThenApp / webFirstCustomers) * 100) : 0;
+
+  return {
+    web_first_customers: webFirstCustomers,
+    web_then_app: webThenApp,
+    web_to_app_rate_pct: rate
+  };
+}
+
+async function computeAbandonedCheckouts(checkouts) {
+  const productStats = new Map();
+  let totalValue = 0;
+
+  for (const checkout of checkouts) {
+    const checkoutValue = Number.parseFloat(
+      checkout.total_price || checkout.total_line_items_price || checkout.subtotal_price || 0
+    );
+    totalValue += checkoutValue;
+
+    for (const item of checkout.line_items || []) {
+      const title = item.title || 'Untitled product';
+      const quantity = Number(item.quantity || 0);
+      const lineValue = Number.parseFloat(item.price || 0) * quantity;
+
+      if (!productStats.has(title)) {
+        productStats.set(title, {
+          title,
+          count: 0,
+          value: 0
+        });
+      }
+
+      const product = productStats.get(title);
+      product.count += quantity;
+      product.value += lineValue;
+    }
+  }
+
+  const topAbandonedProducts = [...productStats.values()]
+    .map((product) => ({
+      ...product,
+      value: roundCurrency(product.value)
+    }))
+    .sort((a, b) => b.count - a.count || b.value - a.value)
+    .slice(0, 20);
+
+  return {
+    total_abandoned: checkouts.length,
+    total_value: roundCurrency(totalValue),
+    top_abandoned_products: topAbandonedProducts
+  };
+}
+
+async function computeDeliverySlots(orders) {
+  const slotMap = new Map();
+
+  for (const order of orders) {
+    const tags = order.tags || '';
+    const match = tags.match(DELIVERY_TAG_REGEX);
+
+    if (!match) {
+      continue;
+    }
+
+    const deliveryDate = match[1];
+
+    if (!slotMap.has(deliveryDate)) {
+      slotMap.set(deliveryDate, {
+        date: deliveryDate,
+        orders: 0,
+        revenue: 0
+      });
+    }
+
+    const slot = slotMap.get(deliveryDate);
+    slot.orders += 1;
+    slot.revenue += Number.parseFloat(order.total_price || 0);
+  }
+
+  const slots = [...slotMap.values()]
+    .map((slot) => ({
+      ...slot,
+      revenue: roundCurrency(slot.revenue)
+    }))
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return { slots };
+}
+
+// Background Worker: Refresh All Analytics
+async function refreshAllAnalytics() {
+  if (storeMetadata.isRefreshing) {
+    console.log('⚠️  Refresh already in progress, skipping...');
+    return;
+  }
+
+  storeMetadata.isRefreshing = true;
+  storeMetadata.refreshCount += 1;
+  
+  console.log('');
+  console.log('='.repeat(60));
+  console.log(`🔄 Analytics refresh started (refresh #${storeMetadata.refreshCount})`);
+  console.log('='.repeat(60));
+
+  try {
+    // Process each analytics configuration
+    for (const config of ANALYTICS_CONFIGS) {
+      try {
+        if (config.type === 'ltv') {
+          console.log(`📊 Computing Customer LTV (${config.days} days)...`);
+          const orders = await fetchAllOrders(getSinceIso(config.days));
+          const result = await computeCustomerLtvByChannel(orders, config.days);
+          setInStore(getStoreKey('ltv', config.days), result);
+        } 
+        else if (config.type === 'web-to-app') {
+          console.log(`📊 Computing Web-to-App conversion (${config.days} days)...`);
+          const orders = await fetchAllOrders(getSinceIso(config.days));
+          const result = await computeWebToAppCustomers(orders, config.days);
+          setInStore(getStoreKey('web-to-app', config.days), result);
+        }
+        else if (config.type === 'abandoned') {
+          console.log(`📊 Computing Abandoned Checkouts (${config.days} days)...`);
+          const query = `created_at_min=${encodeURIComponent(getSinceIso(config.days))}&limit=250`;
+          const checkouts = await fetchPaginatedResource('checkouts', query);
+          const result = await computeAbandonedCheckouts(checkouts);
+          setInStore(getStoreKey('abandoned', config.days), result);
+        }
+        else if (config.type === 'delivery-slots') {
+          console.log(`📊 Computing Delivery Slots...`);
+          const query = 'status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags';
+          const orders = await fetchPaginatedResource('orders', query);
+          const result = await computeDeliverySlots(orders);
+          setInStore(getStoreKey('delivery-slots', null), result);
+        }
+      } catch (error) {
+        console.error(`❌ Error computing ${config.type}:${config.days}:`, error.message);
+        storeMetadata.errors.push({
+          config,
+          error: error.message,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    storeMetadata.lastUpdated = new Date().toISOString();
+    console.log('');
+    console.log('✅ Analytics refresh complete!');
+    console.log(`📅 Last updated: ${storeMetadata.lastUpdated}`);
+    console.log(`📦 Store size: ${analyticsStore.size} entries`);
+    console.log('='.repeat(60));
+    console.log('');
+
+  } catch (error) {
+    console.error('❌ Fatal error during analytics refresh:', error);
+    storeMetadata.errors.push({
+      type: 'fatal',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  } finally {
+    storeMetadata.isRefreshing = false;
+  }
+}
+
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    shop: process.env.SHOPIFY_SHOP ? getShopDomain() : null
+    shop: process.env.SHOPIFY_SHOP ? getShopDomain() : null,
+    analytics_store: {
+      last_updated: storeMetadata.lastUpdated,
+      entries: analyticsStore.size,
+      refresh_count: storeMetadata.refreshCount,
+      is_refreshing: storeMetadata.isRefreshing
+    }
   });
 });
 
 app.get('/customer-ltv-by-channel', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 365);
-    const cacheKey = getCacheKey('/customer-ltv-by-channel', { days });
+    const storeKey = getStoreKey('ltv', days);
     
-    // Check cache first
-    const cachedData = getCachedData(cacheKey, 'customer-ltv-by-channel');
-    if (cachedData) {
-      return res.json(cachedData);
+    // Get precomputed data from store
+    const data = getFromStore(storeKey);
+    
+    if (data) {
+      return res.json(data);
     }
     
-    // Cache miss - fetch and process data
-    const orders = await fetchAllOrders(getSinceIso(days));
-    const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    const customers = new Map();
-
-    for (const order of sortedOrders) {
-      const customerKey = getCustomerKey(order.customer);
-      if (!customerKey) {
-        continue;
-      }
-
-      const revenue = Number.parseFloat(order.total_price || 0);
-      const channel = normalizeChannel(order.source_name);
-
-      if (!customers.has(customerKey)) {
-        customers.set(customerKey, {
-          firstChannel: channel,
-          totalOrders: 0,
-          totalRevenue: 0
-        });
-      }
-
-      const customerStats = customers.get(customerKey);
-      customerStats.totalOrders += 1;
-      customerStats.totalRevenue += revenue;
-    }
-
-    const byChannel = {
-      app: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 },
-      web: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 },
-      other: { customers: 0, total_revenue: 0, total_orders: 0, avg_ltv: 0, avg_orders: 0 }
-    };
-
-    for (const stats of customers.values()) {
-      const channelStats = byChannel[stats.firstChannel];
-      channelStats.customers += 1;
-      channelStats.total_revenue += stats.totalRevenue;
-      channelStats.total_orders += stats.totalOrders;
-    }
-
-    for (const channel of Object.keys(byChannel)) {
-      const stats = byChannel[channel];
-      stats.total_revenue = roundCurrency(stats.total_revenue);
-      stats.avg_ltv = stats.customers ? roundCurrency(stats.total_revenue / stats.customers) : 0;
-      stats.avg_orders = stats.customers ? roundCurrency(stats.total_orders / stats.customers) : 0;
-    }
-
-    const result = {
-      period_days: days,
-      by_channel: byChannel
-    };
-    
-    // Store in cache
-    setCachedData(cacheKey, result, 'customer-ltv-by-channel');
-
-    res.json(result);
+    // Fallback if data not yet computed
+    return res.status(503).json({
+      error: 'Analytics not yet computed',
+      message: `Data for ${days} days is being computed. Please try again in a moment.`,
+      last_updated: storeMetadata.lastUpdated,
+      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('ltv:'))
+    });
   } catch (error) {
     console.error('Error in /customer-ltv-by-channel:', error);
     sendError(res, error);
@@ -341,65 +552,22 @@ app.get('/customer-ltv-by-channel', async (req, res) => {
 app.get('/web-to-app-customers', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 365);
-    const cacheKey = getCacheKey('/web-to-app-customers', { days });
+    const storeKey = getStoreKey('web-to-app', days);
     
-    // Check cache first
-    const cachedData = getCachedData(cacheKey, 'web-to-app-customers');
-    if (cachedData) {
-      return res.json(cachedData);
+    // Get precomputed data from store
+    const data = getFromStore(storeKey);
+    
+    if (data) {
+      return res.json(data);
     }
     
-    // Cache miss - fetch and process data
-    const orders = await fetchAllOrders(getSinceIso(days));
-    const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    const customers = new Map();
-
-    for (const order of sortedOrders) {
-      const customerKey = getCustomerKey(order.customer);
-      if (!customerKey) {
-        continue;
-      }
-
-      const channel = normalizeChannel(order.source_name);
-
-      if (!customers.has(customerKey)) {
-        customers.set(customerKey, {
-          firstChannel: channel,
-          channels: new Set([channel])
-        });
-        continue;
-      }
-
-      customers.get(customerKey).channels.add(channel);
-    }
-
-    let webFirstCustomers = 0;
-    let webThenApp = 0;
-
-    for (const customer of customers.values()) {
-      if (customer.firstChannel !== 'web') {
-        continue;
-      }
-
-      webFirstCustomers += 1;
-
-      if (customer.channels.has('app')) {
-        webThenApp += 1;
-      }
-    }
-
-    const rate = webFirstCustomers ? roundCurrency((webThenApp / webFirstCustomers) * 100) : 0;
-
-    const result = {
-      web_first_customers: webFirstCustomers,
-      web_then_app: webThenApp,
-      web_to_app_rate_pct: rate
-    };
-    
-    // Store in cache
-    setCachedData(cacheKey, result, 'web-to-app-customers');
-
-    res.json(result);
+    // Fallback if data not yet computed
+    return res.status(503).json({
+      error: 'Analytics not yet computed',
+      message: `Data for ${days} days is being computed. Please try again in a moment.`,
+      last_updated: storeMetadata.lastUpdated,
+      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('web-to-app:'))
+    });
   } catch (error) {
     console.error('Error in /web-to-app-customers:', error);
     sendError(res, error);
@@ -409,63 +577,22 @@ app.get('/web-to-app-customers', async (req, res) => {
 app.get('/abandoned-checkouts', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 14);
-    const cacheKey = getCacheKey('/abandoned-checkouts', { days });
+    const storeKey = getStoreKey('abandoned', days);
     
-    // Check cache first
-    const cachedData = getCachedData(cacheKey, 'abandoned-checkouts');
-    if (cachedData) {
-      return res.json(cachedData);
+    // Get precomputed data from store
+    const data = getFromStore(storeKey);
+    
+    if (data) {
+      return res.json(data);
     }
     
-    // Cache miss - fetch and process data
-    const query = `created_at_min=${encodeURIComponent(getSinceIso(days))}&limit=250`;
-    const checkouts = await fetchPaginatedResource('checkouts', query);
-    const productStats = new Map();
-    let totalValue = 0;
-
-    for (const checkout of checkouts) {
-      const checkoutValue = Number.parseFloat(
-        checkout.total_price || checkout.total_line_items_price || checkout.subtotal_price || 0
-      );
-      totalValue += checkoutValue;
-
-      for (const item of checkout.line_items || []) {
-        const title = item.title || 'Untitled product';
-        const quantity = Number(item.quantity || 0);
-        const lineValue = Number.parseFloat(item.price || 0) * quantity;
-
-        if (!productStats.has(title)) {
-          productStats.set(title, {
-            title,
-            count: 0,
-            value: 0
-          });
-        }
-
-        const product = productStats.get(title);
-        product.count += quantity;
-        product.value += lineValue;
-      }
-    }
-
-    const topAbandonedProducts = [...productStats.values()]
-      .map((product) => ({
-        ...product,
-        value: roundCurrency(product.value)
-      }))
-      .sort((a, b) => b.count - a.count || b.value - a.value)
-      .slice(0, 20);
-
-    const result = {
-      total_abandoned: checkouts.length,
-      total_value: roundCurrency(totalValue),
-      top_abandoned_products: topAbandonedProducts
-    };
-    
-    // Store in cache
-    setCachedData(cacheKey, result, 'abandoned-checkouts');
-
-    res.json(result);
+    // Fallback if data not yet computed
+    return res.status(503).json({
+      error: 'Analytics not yet computed',
+      message: `Data for ${days} days is being computed. Please try again in a moment.`,
+      last_updated: storeMetadata.lastUpdated,
+      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('abandoned:'))
+    });
   } catch (error) {
     console.error('Error in /abandoned-checkouts:', error);
     sendError(res, error);
@@ -474,56 +601,21 @@ app.get('/abandoned-checkouts', async (req, res) => {
 
 app.get('/delivery-slots', async (req, res) => {
   try {
-    const cacheKey = getCacheKey('/delivery-slots', {});
+    const storeKey = getStoreKey('delivery-slots', null);
     
-    // Check cache first
-    const cachedData = getCachedData(cacheKey, 'delivery-slots');
-    if (cachedData) {
-      return res.json(cachedData);
+    // Get precomputed data from store
+    const data = getFromStore(storeKey);
+    
+    if (data) {
+      return res.json(data);
     }
     
-    // Cache miss - fetch and process data
-    const query = 'status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags';
-    const orders = await fetchPaginatedResource('orders', query);
-
-    const slotMap = new Map();
-
-    for (const order of orders) {
-      const tags = order.tags || '';
-      const match = tags.match(DELIVERY_TAG_REGEX);
-
-      if (!match) {
-        continue;
-      }
-
-      const deliveryDate = match[1];
-
-      if (!slotMap.has(deliveryDate)) {
-        slotMap.set(deliveryDate, {
-          date: deliveryDate,
-          orders: 0,
-          revenue: 0
-        });
-      }
-
-      const slot = slotMap.get(deliveryDate);
-      slot.orders += 1;
-      slot.revenue += Number.parseFloat(order.total_price || 0);
-    }
-
-    const slots = [...slotMap.values()]
-      .map((slot) => ({
-        ...slot,
-        revenue: roundCurrency(slot.revenue)
-      }))
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    const result = { slots };
-    
-    // Store in cache
-    setCachedData(cacheKey, result, 'delivery-slots');
-
-    res.json(result);
+    // Fallback if data not yet computed
+    return res.status(503).json({
+      error: 'Analytics not yet computed',
+      message: 'Delivery slots data is being computed. Please try again in a moment.',
+      last_updated: storeMetadata.lastUpdated
+    });
   } catch (error) {
     console.error('Error in /delivery-slots:', error);
     sendError(res, error);
@@ -535,6 +627,38 @@ app.use((error, req, res, next) => {
   sendError(res, error);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+// Server startup with analytics warm-up
+async function startServer() {
+  console.log('');
+  console.log('═'.repeat(60));
+  console.log('🚀 Starting Shopify Analytics Proxy Server');
+  console.log('═'.repeat(60));
+  console.log('');
+
+  // Initial analytics warm-up
+  console.log('🔥 Running initial analytics warm-up...');
+  await refreshAllAnalytics();
+
+  // Start background worker
+  console.log('⏰ Starting background analytics refresh worker...');
+  console.log(`📅 Refresh interval: ${REFRESH_INTERVAL / 1000 / 60} minutes`);
+  setInterval(refreshAllAnalytics, REFRESH_INTERVAL);
+
+  // Start Express server
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log('');
+    console.log('═'.repeat(60));
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`🏪 Shop: ${getShopDomain()}`);
+    console.log(`📊 Analytics store: ${analyticsStore.size} entries`);
+    console.log(`🔄 Background refresh: Every ${REFRESH_INTERVAL / 1000 / 60} minutes`);
+    console.log('═'.repeat(60));
+    console.log('');
+  });
+}
+
+// Start the server
+startServer().catch((error) => {
+  console.error('❌ Fatal error during server startup:', error);
+  process.exit(1);
 });
