@@ -8,6 +8,17 @@ const PORT = Number(process.env.PORT) || 3001;
 const SHOPIFY_API_VERSION = '2024-01';
 const DELIVERY_TAG_REGEX = /Delivery on (\d+ \w+ \d{4})/;
 
+// In-memory cache for analytics endpoints
+const cache = new Map();
+
+// Cache TTL configuration (in milliseconds)
+const CACHE_TTL = {
+  'customer-ltv-by-channel': 15 * 60 * 1000,  // 15 minutes
+  'web-to-app-customers': 15 * 60 * 1000,      // 15 minutes
+  'abandoned-checkouts': 7 * 60 * 1000,        // 7 minutes
+  'delivery-slots': 15 * 60 * 1000             // 15 minutes
+};
+
 // Node 18+ exposes fetch globally. If it is unavailable, fall back to node-fetch.
 const fetchFn = (...args) => {
   if (typeof fetch === 'function') {
@@ -102,6 +113,43 @@ function roundCurrency(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Cache helper functions
+function getCacheKey(endpoint, queryParams) {
+  const params = new URLSearchParams(queryParams).toString();
+  return params ? `${endpoint}?${params}` : endpoint;
+}
+
+function getCachedData(cacheKey, endpointName) {
+  const cached = cache.get(cacheKey);
+  
+  if (!cached) {
+    console.log(`Cache MISS: ${cacheKey}`);
+    return null;
+  }
+  
+  const now = Date.now();
+  const age = now - cached.timestamp;
+  const ttl = CACHE_TTL[endpointName] || 10 * 60 * 1000;
+  
+  if (age > ttl) {
+    console.log(`Cache EXPIRED: ${cacheKey} (age: ${Math.round(age / 1000)}s, TTL: ${Math.round(ttl / 1000)}s)`);
+    cache.delete(cacheKey);
+    return null;
+  }
+  
+  console.log(`Cache HIT: ${cacheKey} (age: ${Math.round(age / 1000)}s)`);
+  return cached.data;
+}
+
+function setCachedData(cacheKey, data, endpointName) {
+  cache.set(cacheKey, {
+    data: data,
+    timestamp: Date.now(),
+    ttl: CACHE_TTL[endpointName] || 10 * 60 * 1000
+  });
+  console.log(`Cache STORED: ${cacheKey}`);
 }
 
 function getRetryDelayMs(retryAfterHeader) {
@@ -220,6 +268,15 @@ app.get('/', (req, res) => {
 app.get('/customer-ltv-by-channel', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 365);
+    const cacheKey = getCacheKey('/customer-ltv-by-channel', { days });
+    
+    // Check cache first
+    const cachedData = getCachedData(cacheKey, 'customer-ltv-by-channel');
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    
+    // Cache miss - fetch and process data
     const orders = await fetchAllOrders(getSinceIso(days));
     const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const customers = new Map();
@@ -266,10 +323,15 @@ app.get('/customer-ltv-by-channel', async (req, res) => {
       stats.avg_orders = stats.customers ? roundCurrency(stats.total_orders / stats.customers) : 0;
     }
 
-    res.json({
+    const result = {
       period_days: days,
       by_channel: byChannel
-    });
+    };
+    
+    // Store in cache
+    setCachedData(cacheKey, result, 'customer-ltv-by-channel');
+
+    res.json(result);
   } catch (error) {
     console.error('Error in /customer-ltv-by-channel:', error);
     sendError(res, error);
@@ -279,6 +341,15 @@ app.get('/customer-ltv-by-channel', async (req, res) => {
 app.get('/web-to-app-customers', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 365);
+    const cacheKey = getCacheKey('/web-to-app-customers', { days });
+    
+    // Check cache first
+    const cachedData = getCachedData(cacheKey, 'web-to-app-customers');
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    
+    // Cache miss - fetch and process data
     const orders = await fetchAllOrders(getSinceIso(days));
     const sortedOrders = orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const customers = new Map();
@@ -319,11 +390,16 @@ app.get('/web-to-app-customers', async (req, res) => {
 
     const rate = webFirstCustomers ? roundCurrency((webThenApp / webFirstCustomers) * 100) : 0;
 
-    res.json({
+    const result = {
       web_first_customers: webFirstCustomers,
       web_then_app: webThenApp,
       web_to_app_rate_pct: rate
-    });
+    };
+    
+    // Store in cache
+    setCachedData(cacheKey, result, 'web-to-app-customers');
+
+    res.json(result);
   } catch (error) {
     console.error('Error in /web-to-app-customers:', error);
     sendError(res, error);
@@ -333,6 +409,15 @@ app.get('/web-to-app-customers', async (req, res) => {
 app.get('/abandoned-checkouts', async (req, res) => {
   try {
     const days = getDaysParam(req.query.days, 14);
+    const cacheKey = getCacheKey('/abandoned-checkouts', { days });
+    
+    // Check cache first
+    const cachedData = getCachedData(cacheKey, 'abandoned-checkouts');
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    
+    // Cache miss - fetch and process data
     const query = `created_at_min=${encodeURIComponent(getSinceIso(days))}&limit=250`;
     const checkouts = await fetchPaginatedResource('checkouts', query);
     const productStats = new Map();
@@ -371,11 +456,16 @@ app.get('/abandoned-checkouts', async (req, res) => {
       .sort((a, b) => b.count - a.count || b.value - a.value)
       .slice(0, 20);
 
-    res.json({
+    const result = {
       total_abandoned: checkouts.length,
       total_value: roundCurrency(totalValue),
       top_abandoned_products: topAbandonedProducts
-    });
+    };
+    
+    // Store in cache
+    setCachedData(cacheKey, result, 'abandoned-checkouts');
+
+    res.json(result);
   } catch (error) {
     console.error('Error in /abandoned-checkouts:', error);
     sendError(res, error);
@@ -384,6 +474,15 @@ app.get('/abandoned-checkouts', async (req, res) => {
 
 app.get('/delivery-slots', async (req, res) => {
   try {
+    const cacheKey = getCacheKey('/delivery-slots', {});
+    
+    // Check cache first
+    const cachedData = getCachedData(cacheKey, 'delivery-slots');
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    
+    // Cache miss - fetch and process data
     const query = 'status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags';
     const orders = await fetchPaginatedResource('orders', query);
 
@@ -419,7 +518,12 @@ app.get('/delivery-slots', async (req, res) => {
       }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    res.json({ slots });
+    const result = { slots };
+    
+    // Store in cache
+    setCachedData(cacheKey, result, 'delivery-slots');
+
+    res.json(result);
   } catch (error) {
     console.error('Error in /delivery-slots:', error);
     sendError(res, error);
