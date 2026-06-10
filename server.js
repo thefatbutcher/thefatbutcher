@@ -570,191 +570,163 @@ app.get('/', (req, res) => {
 });
 
 app.get('/customer-ltv-by-channel', (req, res) => {
-  try {
-    // Validate time window contract
-    const validation = validateTimeWindow(req.query.days || 365);
-    
-    if (!validation.valid) {
-      console.log(`[ANALYTICS] Request received: ltv (INVALID: ${req.query.days})`);
-      return res.status(400).json({
-        error: validation.error,
-        allowed_windows: validation.allowed,
-        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
-      });
-    }
-    
-    const days = validation.days;
-    const storeKey = getStoreKey('ltv', days);
-    
-    console.log(`[ANALYTICS] Request received: ${storeKey}`);
-    
-    // STRICT CACHE-FIRST: Only return from in-memory cache
-    const data = analyticsStore.get(storeKey);
-    
-    if (data) {
-      // Cache hit - return immediately
-      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
-      return res.json(data);
-    }
-    
-    // Cache miss - return fast warming_up response
-    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
-    return res.status(202).json({
-      status: 'warming_up',
-      message: 'Data is being prepared by background worker',
-      key: storeKey,
-      retry_after: 5,
-      last_updated: storeMetadata.lastUpdated,
-      is_refreshing: storeMetadata.isRefreshing
-    });
-  } catch (error) {
-    console.error('[ANALYTICS] Error in /customer-ltv-by-channel:', error);
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
+  // ZERO-COMPUTATION: Direct cache read only
+  const startTime = Date.now();
+  
+  // Parse and validate inline (no helper functions)
+  const daysParam = req.query.days || 365;
+  const days = Number.parseInt(daysParam, 10);
+  
+  // Validation check (no helper function)
+  if (Number.isNaN(days) || !ALLOWED_WINDOWS.includes(days)) {
+    return res.status(400).json({
+      error: 'Invalid time window',
+      allowed_windows: ALLOWED_WINDOWS,
+      message: `Please use one of the allowed time windows: ${ALLOWED_WINDOWS.join(', ')} days`
     });
   }
+  
+  // Direct cache key construction (no helper function)
+  const cacheKey = `ltv:${days}`;
+  
+  // PURE MEMORY READ: Direct cache access
+  const cachedResult = analyticsStore.get(cacheKey);
+  
+  if (cachedResult) {
+    const elapsed = Date.now() - startTime;
+    console.log(`[ANALYTICS] CACHE HIT - INSTANT RESPONSE: ${cacheKey} (${elapsed}ms)`);
+    return res.json(cachedResult);
+  }
+  
+  // Cache miss
+  const elapsed = Date.now() - startTime;
+  console.log(`[ANALYTICS] Cache MISS: ${cacheKey} (${elapsed}ms)`);
+  return res.status(202).json({
+    status: 'warming_up',
+    message: 'Data is being prepared by background worker',
+    key: cacheKey,
+    retry_after: 5
+  });
 });
 
 app.get('/web-to-app-customers', (req, res) => {
-  try {
-    // Validate time window contract
-    const validation = validateTimeWindow(req.query.days || 365);
-    
-    if (!validation.valid) {
-      console.log(`[ANALYTICS] Request received: web (INVALID: ${req.query.days})`);
-      return res.status(400).json({
-        error: validation.error,
-        allowed_windows: validation.allowed,
-        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
-      });
-    }
-    
-    const days = validation.days;
-    const storeKey = getStoreKey('web', days);
-    
-    console.log(`[ANALYTICS] Request received: ${storeKey}`);
-    
-    // STRICT CACHE-FIRST: Only return from in-memory cache
-    const data = analyticsStore.get(storeKey);
-    
-    if (data) {
-      // Cache hit - return immediately
-      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
-      return res.json(data);
-    }
-    
-    // Cache miss - return fast warming_up response
-    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
-    return res.status(202).json({
-      status: 'warming_up',
-      message: 'Data is being prepared by background worker',
-      key: storeKey,
-      retry_after: 5,
-      last_updated: storeMetadata.lastUpdated,
-      is_refreshing: storeMetadata.isRefreshing
-    });
-  } catch (error) {
-    console.error('[ANALYTICS] Error in /web-to-app-customers:', error);
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
+  // ZERO-COMPUTATION: Direct cache read only
+  const startTime = Date.now();
+  
+  // Parse and validate inline (no helper functions)
+  const daysParam = req.query.days || 365;
+  const days = Number.parseInt(daysParam, 10);
+  
+  // Validation check (no helper function)
+  if (Number.isNaN(days) || !ALLOWED_WINDOWS.includes(days)) {
+    return res.status(400).json({
+      error: 'Invalid time window',
+      allowed_windows: ALLOWED_WINDOWS,
+      message: `Please use one of the allowed time windows: ${ALLOWED_WINDOWS.join(', ')} days`
     });
   }
+  
+  // Direct cache key construction (no helper function)
+  const cacheKey = `web:${days}`;
+  
+  // PURE MEMORY READ: Direct cache access
+  const cachedResult = analyticsStore.get(cacheKey);
+  
+  if (cachedResult) {
+    const elapsed = Date.now() - startTime;
+    console.log(`[ANALYTICS] CACHE HIT - INSTANT RESPONSE: ${cacheKey} (${elapsed}ms)`);
+    return res.json(cachedResult);
+  }
+  
+  // Cache miss
+  const elapsed = Date.now() - startTime;
+  console.log(`[ANALYTICS] Cache MISS: ${cacheKey} (${elapsed}ms)`);
+  return res.status(202).json({
+    status: 'warming_up',
+    message: 'Data is being prepared by background worker',
+    key: cacheKey,
+    retry_after: 5
+  });
 });
 
 app.get('/abandoned-checkouts', (req, res) => {
-  try {
-    // Validate time window contract
-    const validation = validateTimeWindow(req.query.days || 30);
-    
-    if (!validation.valid) {
-      console.log(`[ANALYTICS] Request received: checkout (INVALID: ${req.query.days})`);
-      return res.status(400).json({
-        error: validation.error,
-        allowed_windows: validation.allowed,
-        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
-      });
-    }
-    
-    const days = validation.days;
-    const storeKey = getStoreKey('checkout', days);
-    
-    console.log(`[ANALYTICS] Request received: ${storeKey}`);
-    
-    // STRICT CACHE-FIRST: Only return from in-memory cache
-    const data = analyticsStore.get(storeKey);
-    
-    if (data) {
-      // Cache hit - return immediately
-      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
-      return res.json(data);
-    }
-    
-    // Cache miss - return fast warming_up response
-    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
-    return res.status(202).json({
-      status: 'warming_up',
-      message: 'Data is being prepared by background worker',
-      key: storeKey,
-      retry_after: 5,
-      last_updated: storeMetadata.lastUpdated,
-      is_refreshing: storeMetadata.isRefreshing
-    });
-  } catch (error) {
-    console.error('[ANALYTICS] Error in /abandoned-checkouts:', error);
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
+  // ZERO-COMPUTATION: Direct cache read only
+  const startTime = Date.now();
+  
+  // Parse and validate inline (no helper functions)
+  const daysParam = req.query.days || 30;
+  const days = Number.parseInt(daysParam, 10);
+  
+  // Validation check (no helper function)
+  if (Number.isNaN(days) || !ALLOWED_WINDOWS.includes(days)) {
+    return res.status(400).json({
+      error: 'Invalid time window',
+      allowed_windows: ALLOWED_WINDOWS,
+      message: `Please use one of the allowed time windows: ${ALLOWED_WINDOWS.join(', ')} days`
     });
   }
+  
+  // Direct cache key construction (no helper function)
+  const cacheKey = `checkout:${days}`;
+  
+  // PURE MEMORY READ: Direct cache access
+  const cachedResult = analyticsStore.get(cacheKey);
+  
+  if (cachedResult) {
+    const elapsed = Date.now() - startTime;
+    console.log(`[ANALYTICS] CACHE HIT - INSTANT RESPONSE: ${cacheKey} (${elapsed}ms)`);
+    return res.json(cachedResult);
+  }
+  
+  // Cache miss
+  const elapsed = Date.now() - startTime;
+  console.log(`[ANALYTICS] Cache MISS: ${cacheKey} (${elapsed}ms)`);
+  return res.status(202).json({
+    status: 'warming_up',
+    message: 'Data is being prepared by background worker',
+    key: cacheKey,
+    retry_after: 5
+  });
 });
 
 app.get('/delivery-slots', (req, res) => {
-  try {
-    // Validate time window contract
-    const validation = validateTimeWindow(req.query.days || 30);
-    
-    if (!validation.valid) {
-      console.log(`[ANALYTICS] Request received: delivery (INVALID: ${req.query.days})`);
-      return res.status(400).json({
-        error: validation.error,
-        allowed_windows: validation.allowed,
-        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
-      });
-    }
-    
-    const days = validation.days;
-    const storeKey = getStoreKey('delivery', days);
-    
-    console.log(`[ANALYTICS] Request received: ${storeKey}`);
-    
-    // STRICT CACHE-FIRST: Only return from in-memory cache
-    const data = analyticsStore.get(storeKey);
-    
-    if (data) {
-      // Cache hit - return immediately
-      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
-      return res.json(data);
-    }
-    
-    // Cache miss - return fast warming_up response
-    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
-    return res.status(202).json({
-      status: 'warming_up',
-      message: 'Data is being prepared by background worker',
-      key: storeKey,
-      retry_after: 5,
-      last_updated: storeMetadata.lastUpdated,
-      is_refreshing: storeMetadata.isRefreshing
-    });
-  } catch (error) {
-    console.error('[ANALYTICS] Error in /delivery-slots:', error);
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
+  // ZERO-COMPUTATION: Direct cache read only
+  const startTime = Date.now();
+  
+  // Parse and validate inline (no helper functions)
+  const daysParam = req.query.days || 30;
+  const days = Number.parseInt(daysParam, 10);
+  
+  // Validation check (no helper function)
+  if (Number.isNaN(days) || !ALLOWED_WINDOWS.includes(days)) {
+    return res.status(400).json({
+      error: 'Invalid time window',
+      allowed_windows: ALLOWED_WINDOWS,
+      message: `Please use one of the allowed time windows: ${ALLOWED_WINDOWS.join(', ')} days`
     });
   }
+  
+  // Direct cache key construction (no helper function)
+  const cacheKey = `delivery:${days}`;
+  
+  // PURE MEMORY READ: Direct cache access
+  const cachedResult = analyticsStore.get(cacheKey);
+  
+  if (cachedResult) {
+    const elapsed = Date.now() - startTime;
+    console.log(`[ANALYTICS] CACHE HIT - INSTANT RESPONSE: ${cacheKey} (${elapsed}ms)`);
+    return res.json(cachedResult);
+  }
+  
+  // Cache miss
+  const elapsed = Date.now() - startTime;
+  console.log(`[ANALYTICS] Cache MISS: ${cacheKey} (${elapsed}ms)`);
+  return res.status(202).json({
+    status: 'warming_up',
+    message: 'Data is being prepared by background worker',
+    key: cacheKey,
+    retry_after: 5
+  });
 });
 
 app.use((error, req, res, next) => {
