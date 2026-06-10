@@ -475,20 +475,31 @@ async function computeDeliverySlots(orders, days) {
   };
 }
 
+// Global refresh lock (prevents concurrent execution)
+let globalRefreshLock = false;
+
 // Background Worker: Refresh All Analytics
 async function refreshAllAnalytics() {
-  if (storeMetadata.isRefreshing) {
-    console.log('⚠️  Refresh already in progress, skipping...');
+  // STRICT SINGLE-THREADED EXECUTION: Check global lock
+  if (globalRefreshLock) {
+    console.log('⚠️  REFRESH SKIPPED - ALREADY RUNNING');
     return;
   }
 
+  // Acquire global lock
+  globalRefreshLock = true;
   storeMetadata.isRefreshing = true;
   storeMetadata.refreshCount += 1;
   
+  const refreshStartTime = Date.now();
   console.log('');
   console.log('='.repeat(60));
   console.log(`🔄 Analytics refresh started (refresh #${storeMetadata.refreshCount})`);
+  console.log(`🔒 Global lock ACQUIRED`);
   console.log('='.repeat(60));
+
+  let completedCount = 0;
+  const totalCount = ANALYTICS_CONFIGS.length;
 
   try {
     // Process each analytics configuration
@@ -501,12 +512,14 @@ async function refreshAllAnalytics() {
           const orders = await fetchAllOrders(getSinceIso(config.days));
           const result = await computeCustomerLtvByChannel(orders, config.days);
           setInStore(key, result);
+          completedCount++;
         } 
         else if (config.type === 'web') {
           console.log(`📊 Computing Web-to-App conversion (${config.days} days)...`);
           const orders = await fetchAllOrders(getSinceIso(config.days));
           const result = await computeWebToAppCustomers(orders, config.days);
           setInStore(key, result);
+          completedCount++;
         }
         else if (config.type === 'checkout') {
           console.log(`📊 Computing Abandoned Checkouts (${config.days} days)...`);
@@ -514,6 +527,7 @@ async function refreshAllAnalytics() {
           const checkouts = await fetchPaginatedResource('checkouts', query);
           const result = await computeAbandonedCheckouts(checkouts, config.days);
           setInStore(key, result);
+          completedCount++;
         }
         else if (config.type === 'delivery') {
           console.log(`📊 Computing Delivery Slots (${config.days} days)...`);
@@ -521,6 +535,7 @@ async function refreshAllAnalytics() {
           const orders = await fetchPaginatedResource('orders', query);
           const result = await computeDeliverySlots(orders, config.days);
           setInStore(key, result);
+          completedCount++;
         }
       } catch (error) {
         console.error(`❌ Error computing ${config.type}:${config.days}:`, error.message);
@@ -529,14 +544,18 @@ async function refreshAllAnalytics() {
           error: error.message,
           timestamp: new Date().toISOString()
         });
+        // Continue with other configurations even if one fails
       }
     }
 
     storeMetadata.lastUpdated = new Date().toISOString();
+    const refreshElapsed = Date.now() - refreshStartTime;
     console.log('');
     console.log('✅ Analytics refresh complete!');
+    console.log(`📊 Completed: ${completedCount}/${totalCount} entries`);
     console.log(`📅 Last updated: ${storeMetadata.lastUpdated}`);
     console.log(`📦 Store size: ${analyticsStore.size} entries`);
+    console.log(`⏱️  Refresh duration: ${Math.round(refreshElapsed / 1000)}s`);
     console.log('='.repeat(60));
     console.log('');
 
@@ -548,7 +567,10 @@ async function refreshAllAnalytics() {
       timestamp: new Date().toISOString()
     });
   } finally {
+    // ALWAYS release lock and reset flag
+    globalRefreshLock = false;
     storeMetadata.isRefreshing = false;
+    console.log('🔓 Global lock RELEASED');
   }
 }
 
