@@ -569,7 +569,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/customer-ltv-by-channel', async (req, res) => {
+app.get('/customer-ltv-by-channel', (req, res) => {
   try {
     // Validate time window contract
     const validation = validateTimeWindow(req.query.days || 365);
@@ -588,28 +588,35 @@ app.get('/customer-ltv-by-channel', async (req, res) => {
     
     console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
-    // Get precomputed data from store
-    const data = getFromStore(storeKey);
+    // STRICT CACHE-FIRST: Only return from in-memory cache
+    const data = analyticsStore.get(storeKey);
     
     if (data) {
+      // Cache hit - return immediately
+      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
       return res.json(data);
     }
     
-    // Fallback: data is being computed (should only happen during startup)
+    // Cache miss - return fast warming_up response
+    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
     return res.status(202).json({
-      status: 'computing',
+      status: 'warming_up',
+      message: 'Data is being prepared by background worker',
       key: storeKey,
-      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
-      retry_after_seconds: 5,
-      last_updated: storeMetadata.lastUpdated
+      retry_after: 5,
+      last_updated: storeMetadata.lastUpdated,
+      is_refreshing: storeMetadata.isRefreshing
     });
   } catch (error) {
     console.error('[ANALYTICS] Error in /customer-ltv-by-channel:', error);
-    sendError(res, error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-app.get('/web-to-app-customers', async (req, res) => {
+app.get('/web-to-app-customers', (req, res) => {
   try {
     // Validate time window contract
     const validation = validateTimeWindow(req.query.days || 365);
@@ -628,28 +635,35 @@ app.get('/web-to-app-customers', async (req, res) => {
     
     console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
-    // Get precomputed data from store
-    const data = getFromStore(storeKey);
+    // STRICT CACHE-FIRST: Only return from in-memory cache
+    const data = analyticsStore.get(storeKey);
     
     if (data) {
+      // Cache hit - return immediately
+      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
       return res.json(data);
     }
     
-    // Fallback: data is being computed
+    // Cache miss - return fast warming_up response
+    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
     return res.status(202).json({
-      status: 'computing',
+      status: 'warming_up',
+      message: 'Data is being prepared by background worker',
       key: storeKey,
-      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
-      retry_after_seconds: 5,
-      last_updated: storeMetadata.lastUpdated
+      retry_after: 5,
+      last_updated: storeMetadata.lastUpdated,
+      is_refreshing: storeMetadata.isRefreshing
     });
   } catch (error) {
     console.error('[ANALYTICS] Error in /web-to-app-customers:', error);
-    sendError(res, error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-app.get('/abandoned-checkouts', async (req, res) => {
+app.get('/abandoned-checkouts', (req, res) => {
   try {
     // Validate time window contract
     const validation = validateTimeWindow(req.query.days || 30);
@@ -668,28 +682,35 @@ app.get('/abandoned-checkouts', async (req, res) => {
     
     console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
-    // Get precomputed data from store
-    const data = getFromStore(storeKey);
+    // STRICT CACHE-FIRST: Only return from in-memory cache
+    const data = analyticsStore.get(storeKey);
     
     if (data) {
+      // Cache hit - return immediately
+      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
       return res.json(data);
     }
     
-    // Fallback: data is being computed
+    // Cache miss - return fast warming_up response
+    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
     return res.status(202).json({
-      status: 'computing',
+      status: 'warming_up',
+      message: 'Data is being prepared by background worker',
       key: storeKey,
-      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
-      retry_after_seconds: 5,
-      last_updated: storeMetadata.lastUpdated
+      retry_after: 5,
+      last_updated: storeMetadata.lastUpdated,
+      is_refreshing: storeMetadata.isRefreshing
     });
   } catch (error) {
     console.error('[ANALYTICS] Error in /abandoned-checkouts:', error);
-    sendError(res, error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-app.get('/delivery-slots', async (req, res) => {
+app.get('/delivery-slots', (req, res) => {
   try {
     // Validate time window contract
     const validation = validateTimeWindow(req.query.days || 30);
@@ -708,24 +729,31 @@ app.get('/delivery-slots', async (req, res) => {
     
     console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
-    // Get precomputed data from store
-    const data = getFromStore(storeKey);
+    // STRICT CACHE-FIRST: Only return from in-memory cache
+    const data = analyticsStore.get(storeKey);
     
     if (data) {
+      // Cache hit - return immediately
+      console.log(`[ANALYTICS] Cache HIT: ${storeKey}`);
       return res.json(data);
     }
     
-    // Fallback: data is being computed
+    // Cache miss - return fast warming_up response
+    console.log(`[ANALYTICS] Cache MISS: ${storeKey}`);
     return res.status(202).json({
-      status: 'computing',
+      status: 'warming_up',
+      message: 'Data is being prepared by background worker',
       key: storeKey,
-      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
-      retry_after_seconds: 5,
-      last_updated: storeMetadata.lastUpdated
+      retry_after: 5,
+      last_updated: storeMetadata.lastUpdated,
+      is_refreshing: storeMetadata.isRefreshing
     });
   } catch (error) {
     console.error('[ANALYTICS] Error in /delivery-slots:', error);
-    sendError(res, error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
