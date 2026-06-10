@@ -734,38 +734,39 @@ app.use((error, req, res, next) => {
   sendError(res, error);
 });
 
-// Server startup with analytics warm-up
-async function startServer() {
+// Server startup with non-blocking analytics
+function startServer() {
   console.log('');
   console.log('═'.repeat(60));
   console.log('🚀 Starting Shopify Analytics Proxy Server');
   console.log('═'.repeat(60));
   console.log('');
 
-  // Initial analytics warm-up
-  console.log('🔥 Running initial analytics warm-up...');
-  await refreshAllAnalytics();
-
-  // Start background worker
-  console.log('⏰ Starting background analytics refresh worker...');
-  console.log(`📅 Refresh interval: ${REFRESH_INTERVAL / 1000 / 60} minutes`);
-  setInterval(refreshAllAnalytics, REFRESH_INTERVAL);
-
-  // Start Express server
+  // Start Express server immediately (non-blocking)
   app.listen(PORT, '0.0.0.0', () => {
     console.log('');
     console.log('═'.repeat(60));
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`🏪 Shop: ${getShopDomain()}`);
-    console.log(`📊 Analytics store: ${analyticsStore.size} entries`);
-    console.log(`🔄 Background refresh: Every ${REFRESH_INTERVAL / 1000 / 60} minutes`);
     console.log('═'.repeat(60));
     console.log('');
+    console.log('🔥 Starting background analytics warm-up...');
+    console.log('⚠️  API endpoints will return 202 until analytics are computed');
+    console.log('');
+    
+    // Run initial analytics refresh in background (non-blocking)
+    setImmediate(() => {
+      refreshAllAnalytics().catch((error) => {
+        console.error('❌ Error during initial analytics refresh:', error);
+      });
+    });
+    
+    // Start background worker
+    console.log('⏰ Starting background analytics refresh worker...');
+    console.log(`📅 Refresh interval: ${REFRESH_INTERVAL / 1000 / 60} minutes`);
+    setInterval(refreshAllAnalytics, REFRESH_INTERVAL);
   });
 }
 
 // Start the server
-startServer().catch((error) => {
-  console.error('❌ Fatal error during server startup:', error);
-  process.exit(1);
-});
+startServer();
