@@ -19,19 +19,38 @@ const storeMetadata = {
   errors: []
 };
 
+// Analytics Contract: Fixed Time Windows
+const ALLOWED_WINDOWS = [7, 30, 90, 180, 365];
+
 // Refresh interval configuration
 const REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-// Precomputed analytics configurations
+// Precomputed analytics configurations (Contract-based)
 const ANALYTICS_CONFIGS = [
-  { type: 'ltv', days: 365 },
-  { type: 'ltv', days: 90 },
+  // Customer LTV
+  { type: 'ltv', days: 7 },
   { type: 'ltv', days: 30 },
-  { type: 'web-to-app', days: 365 },
-  { type: 'web-to-app', days: 90 },
-  { type: 'abandoned', days: 14 },
-  { type: 'abandoned', days: 7 },
-  { type: 'delivery-slots', days: null }
+  { type: 'ltv', days: 90 },
+  { type: 'ltv', days: 180 },
+  { type: 'ltv', days: 365 },
+  // Web-to-App Conversion
+  { type: 'web', days: 7 },
+  { type: 'web', days: 30 },
+  { type: 'web', days: 90 },
+  { type: 'web', days: 180 },
+  { type: 'web', days: 365 },
+  // Abandoned Checkouts
+  { type: 'checkout', days: 7 },
+  { type: 'checkout', days: 30 },
+  { type: 'checkout', days: 90 },
+  { type: 'checkout', days: 180 },
+  { type: 'checkout', days: 365 },
+  // Delivery Slots
+  { type: 'delivery', days: 7 },
+  { type: 'delivery', days: 30 },
+  { type: 'delivery', days: 90 },
+  { type: 'delivery', days: 180 },
+  { type: 'delivery', days: 365 }
 ];
 
 // Node 18+ exposes fetch globally. If it is unavailable, fall back to node-fetch.
@@ -130,24 +149,39 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Analytics Contract Validation
+function validateTimeWindow(days) {
+  const parsed = Number.parseInt(days, 10);
+  
+  if (Number.isNaN(parsed) || !ALLOWED_WINDOWS.includes(parsed)) {
+    return {
+      valid: false,
+      error: 'Invalid time window',
+      allowed: ALLOWED_WINDOWS
+    };
+  }
+  
+  return { valid: true, days: parsed };
+}
+
 // Analytics Store helper functions
 function getStoreKey(type, days) {
-  return days !== null ? `${type}:${days}` : type;
+  return `${type}:${days}`;
 }
 
 function getFromStore(key) {
   const data = analyticsStore.get(key);
   if (data) {
-    console.log(`⚡ Served from precomputed store: ${key}`);
+    console.log(`[ANALYTICS] Cache HIT: ${key}`);
     return data;
   }
-  console.log(`⚠️  Store MISS: ${key} (data not yet computed)`);
+  console.log(`[ANALYTICS] Cache MISS: ${key}`);
   return null;
 }
 
 function setInStore(key, data) {
   analyticsStore.set(key, data);
-  console.log(`💾 Stored precomputed analytics: ${key}`);
+  console.log(`[ANALYTICS] Worker computed: ${key}`);
 }
 
 function getRetryDelayMs(retryAfterHeader) {
@@ -350,13 +384,14 @@ async function computeWebToAppCustomers(orders, days) {
   const rate = webFirstCustomers ? roundCurrency((webThenApp / webFirstCustomers) * 100) : 0;
 
   return {
+    period_days: days,
     web_first_customers: webFirstCustomers,
     web_then_app: webThenApp,
     web_to_app_rate_pct: rate
   };
 }
 
-async function computeAbandonedCheckouts(checkouts) {
+async function computeAbandonedCheckouts(checkouts, days) {
   const productStats = new Map();
   let totalValue = 0;
 
@@ -394,13 +429,14 @@ async function computeAbandonedCheckouts(checkouts) {
     .slice(0, 20);
 
   return {
+    period_days: days,
     total_abandoned: checkouts.length,
     total_value: roundCurrency(totalValue),
     top_abandoned_products: topAbandonedProducts
   };
 }
 
-async function computeDeliverySlots(orders) {
+async function computeDeliverySlots(orders, days) {
   const slotMap = new Map();
 
   for (const order of orders) {
@@ -433,7 +469,10 @@ async function computeDeliverySlots(orders) {
     }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  return { slots };
+  return {
+    period_days: days,
+    slots
+  };
 }
 
 // Background Worker: Refresh All Analytics
@@ -455,31 +494,33 @@ async function refreshAllAnalytics() {
     // Process each analytics configuration
     for (const config of ANALYTICS_CONFIGS) {
       try {
+        const key = getStoreKey(config.type, config.days);
+        
         if (config.type === 'ltv') {
           console.log(`📊 Computing Customer LTV (${config.days} days)...`);
           const orders = await fetchAllOrders(getSinceIso(config.days));
           const result = await computeCustomerLtvByChannel(orders, config.days);
-          setInStore(getStoreKey('ltv', config.days), result);
+          setInStore(key, result);
         } 
-        else if (config.type === 'web-to-app') {
+        else if (config.type === 'web') {
           console.log(`📊 Computing Web-to-App conversion (${config.days} days)...`);
           const orders = await fetchAllOrders(getSinceIso(config.days));
           const result = await computeWebToAppCustomers(orders, config.days);
-          setInStore(getStoreKey('web-to-app', config.days), result);
+          setInStore(key, result);
         }
-        else if (config.type === 'abandoned') {
+        else if (config.type === 'checkout') {
           console.log(`📊 Computing Abandoned Checkouts (${config.days} days)...`);
           const query = `created_at_min=${encodeURIComponent(getSinceIso(config.days))}&limit=250`;
           const checkouts = await fetchPaginatedResource('checkouts', query);
-          const result = await computeAbandonedCheckouts(checkouts);
-          setInStore(getStoreKey('abandoned', config.days), result);
+          const result = await computeAbandonedCheckouts(checkouts, config.days);
+          setInStore(key, result);
         }
-        else if (config.type === 'delivery-slots') {
-          console.log(`📊 Computing Delivery Slots...`);
-          const query = 'status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags';
+        else if (config.type === 'delivery') {
+          console.log(`📊 Computing Delivery Slots (${config.days} days)...`);
+          const query = `created_at_min=${encodeURIComponent(getSinceIso(config.days))}&status=any&fulfillment_status=on_hold&limit=250&fields=id,created_at,total_price,tags`;
           const orders = await fetchPaginatedResource('orders', query);
-          const result = await computeDeliverySlots(orders);
-          setInStore(getStoreKey('delivery-slots', null), result);
+          const result = await computeDeliverySlots(orders, config.days);
+          setInStore(key, result);
         }
       } catch (error) {
         console.error(`❌ Error computing ${config.type}:${config.days}:`, error.message);
@@ -515,6 +556,10 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     shop: process.env.SHOPIFY_SHOP ? getShopDomain() : null,
+    analytics_contract: {
+      allowed_windows: ALLOWED_WINDOWS,
+      total_configurations: ANALYTICS_CONFIGS.length
+    },
     analytics_store: {
       last_updated: storeMetadata.lastUpdated,
       entries: analyticsStore.size,
@@ -526,8 +571,22 @@ app.get('/', (req, res) => {
 
 app.get('/customer-ltv-by-channel', async (req, res) => {
   try {
-    const days = getDaysParam(req.query.days, 365);
+    // Validate time window contract
+    const validation = validateTimeWindow(req.query.days || 365);
+    
+    if (!validation.valid) {
+      console.log(`[ANALYTICS] Request received: ltv (INVALID: ${req.query.days})`);
+      return res.status(400).json({
+        error: validation.error,
+        allowed_windows: validation.allowed,
+        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
+      });
+    }
+    
+    const days = validation.days;
     const storeKey = getStoreKey('ltv', days);
+    
+    console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
     // Get precomputed data from store
     const data = getFromStore(storeKey);
@@ -536,23 +595,38 @@ app.get('/customer-ltv-by-channel', async (req, res) => {
       return res.json(data);
     }
     
-    // Fallback if data not yet computed
-    return res.status(503).json({
-      error: 'Analytics not yet computed',
-      message: `Data for ${days} days is being computed. Please try again in a moment.`,
-      last_updated: storeMetadata.lastUpdated,
-      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('ltv:'))
+    // Fallback: data is being computed (should only happen during startup)
+    return res.status(202).json({
+      status: 'computing',
+      key: storeKey,
+      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
+      retry_after_seconds: 5,
+      last_updated: storeMetadata.lastUpdated
     });
   } catch (error) {
-    console.error('Error in /customer-ltv-by-channel:', error);
+    console.error('[ANALYTICS] Error in /customer-ltv-by-channel:', error);
     sendError(res, error);
   }
 });
 
 app.get('/web-to-app-customers', async (req, res) => {
   try {
-    const days = getDaysParam(req.query.days, 365);
-    const storeKey = getStoreKey('web-to-app', days);
+    // Validate time window contract
+    const validation = validateTimeWindow(req.query.days || 365);
+    
+    if (!validation.valid) {
+      console.log(`[ANALYTICS] Request received: web (INVALID: ${req.query.days})`);
+      return res.status(400).json({
+        error: validation.error,
+        allowed_windows: validation.allowed,
+        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
+      });
+    }
+    
+    const days = validation.days;
+    const storeKey = getStoreKey('web', days);
+    
+    console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
     // Get precomputed data from store
     const data = getFromStore(storeKey);
@@ -561,23 +635,38 @@ app.get('/web-to-app-customers', async (req, res) => {
       return res.json(data);
     }
     
-    // Fallback if data not yet computed
-    return res.status(503).json({
-      error: 'Analytics not yet computed',
-      message: `Data for ${days} days is being computed. Please try again in a moment.`,
-      last_updated: storeMetadata.lastUpdated,
-      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('web-to-app:'))
+    // Fallback: data is being computed
+    return res.status(202).json({
+      status: 'computing',
+      key: storeKey,
+      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
+      retry_after_seconds: 5,
+      last_updated: storeMetadata.lastUpdated
     });
   } catch (error) {
-    console.error('Error in /web-to-app-customers:', error);
+    console.error('[ANALYTICS] Error in /web-to-app-customers:', error);
     sendError(res, error);
   }
 });
 
 app.get('/abandoned-checkouts', async (req, res) => {
   try {
-    const days = getDaysParam(req.query.days, 14);
-    const storeKey = getStoreKey('abandoned', days);
+    // Validate time window contract
+    const validation = validateTimeWindow(req.query.days || 30);
+    
+    if (!validation.valid) {
+      console.log(`[ANALYTICS] Request received: checkout (INVALID: ${req.query.days})`);
+      return res.status(400).json({
+        error: validation.error,
+        allowed_windows: validation.allowed,
+        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
+      });
+    }
+    
+    const days = validation.days;
+    const storeKey = getStoreKey('checkout', days);
+    
+    console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
     // Get precomputed data from store
     const data = getFromStore(storeKey);
@@ -586,22 +675,38 @@ app.get('/abandoned-checkouts', async (req, res) => {
       return res.json(data);
     }
     
-    // Fallback if data not yet computed
-    return res.status(503).json({
-      error: 'Analytics not yet computed',
-      message: `Data for ${days} days is being computed. Please try again in a moment.`,
-      last_updated: storeMetadata.lastUpdated,
-      available_periods: Array.from(analyticsStore.keys()).filter(k => k.startsWith('abandoned:'))
+    // Fallback: data is being computed
+    return res.status(202).json({
+      status: 'computing',
+      key: storeKey,
+      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
+      retry_after_seconds: 5,
+      last_updated: storeMetadata.lastUpdated
     });
   } catch (error) {
-    console.error('Error in /abandoned-checkouts:', error);
+    console.error('[ANALYTICS] Error in /abandoned-checkouts:', error);
     sendError(res, error);
   }
 });
 
 app.get('/delivery-slots', async (req, res) => {
   try {
-    const storeKey = getStoreKey('delivery-slots', null);
+    // Validate time window contract
+    const validation = validateTimeWindow(req.query.days || 30);
+    
+    if (!validation.valid) {
+      console.log(`[ANALYTICS] Request received: delivery (INVALID: ${req.query.days})`);
+      return res.status(400).json({
+        error: validation.error,
+        allowed_windows: validation.allowed,
+        message: `Please use one of the allowed time windows: ${validation.allowed.join(', ')} days`
+      });
+    }
+    
+    const days = validation.days;
+    const storeKey = getStoreKey('delivery', days);
+    
+    console.log(`[ANALYTICS] Request received: ${storeKey}`);
     
     // Get precomputed data from store
     const data = getFromStore(storeKey);
@@ -610,14 +715,16 @@ app.get('/delivery-slots', async (req, res) => {
       return res.json(data);
     }
     
-    // Fallback if data not yet computed
-    return res.status(503).json({
-      error: 'Analytics not yet computed',
-      message: 'Delivery slots data is being computed. Please try again in a moment.',
+    // Fallback: data is being computed
+    return res.status(202).json({
+      status: 'computing',
+      key: storeKey,
+      message: `Analytics for ${days} days are being computed. This usually takes 30-60 seconds on first startup.`,
+      retry_after_seconds: 5,
       last_updated: storeMetadata.lastUpdated
     });
   } catch (error) {
-    console.error('Error in /delivery-slots:', error);
+    console.error('[ANALYTICS] Error in /delivery-slots:', error);
     sendError(res, error);
   }
 });
